@@ -1,6 +1,6 @@
 {
   "name": "memory-to-repo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Разобрать локальную память Claude Code вместе с человеком: общее — в инструкции репозиториев, личное — в CLAUDE.md, память — выключить.",
   "author": { "name": "Egorrko" },
   "repository": "https://github.com/Egorrko/memory-to-repo",
