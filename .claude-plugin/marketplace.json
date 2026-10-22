@@ -6,8 +6,8 @@
   "plugins": [
     {
       "name": "memory-to-repo",
-      "description": "Разобрать локальную память Claude Code вместе с человеком: общее — в инструкции репозиториев, личное — в CLAUDE.md, память — выключить.",
-      "version": "0.2.0",
+      "description": "Разобрать локальную память Claude Code вместе с человеком: общее — в инструкции репозиториев, личное — в CLAUDE.md и CLAUDE.local.md, опубликовать, память — выключить.",
+      "version": "0.3.0",
       "source": "./",
       "category": "productivity",
       "homepage": "https://github.com/Egorrko/memory-to-repo"

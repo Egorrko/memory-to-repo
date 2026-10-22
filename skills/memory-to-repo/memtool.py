@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Helper for the memory-to-repo skill. Stdlib only; Linux, macOS, Windows.
 
-  memtool.py inventory          JSON: every project with auto-memory, its real path, repo facts, records
-  memtool.py status             progress: which projects are done, step k/N
-  memtool.py done <project-id>  move that project's memory dir to the archive, mark it done
-  memtool.py finish             autoMemoryEnabled=false in ~/.claude/settings.json, mark the run finished
+  memtool.py inventory                       JSON: global CLAUDE.md, root policies, every project with auto-memory
+  memtool.py status                          progress, root policies, recorded branches
+  memtool.py policy <root> <owner> <publish> owner: mine|team|company|public; publish: direct|pr|none
+  memtool.py obsolete "<text>"               tools/rules the human says are gone; passed to every triage
+  memtool.py branch <repo> <branch> <target> a commit to publish at the end (target: branch to push to / PR base)
+  memtool.py done <project-id>               move that project's memory dir to the archive, mark it done
+  memtool.py cost                            minutes and API-equivalent dollars of this run (main session + subagents)
+  memtool.py finish                          autoMemoryEnabled=false in ~/.claude/settings.json, mark the run finished
 
 Nothing is deleted: processed memory goes to ~/.claude/memory-archive/<project-id>/.
 """
@@ -30,7 +34,11 @@ def load_state():
     try:
         return json.loads(STATE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"started": datetime.now().isoformat(timespec="minutes"), "done": {}, "finished": None}
+        return {"started": datetime.now().isoformat(timespec="seconds"), "done": {}, "finished": None}
+
+
+def state_get(state, key, default):
+    return state.setdefault(key, default)
 
 
 def save_state(state):
@@ -87,6 +95,31 @@ def git(path, *args):
     return res.stdout.strip() if res.returncode == 0 else None
 
 
+def policy_for(path, roots):
+    """The policy of the deepest root that contains path."""
+    best = None
+    for root in roots:
+        r = os.path.expanduser(root).rstrip(os.sep)
+        if path and (path == r or path.startswith(r + os.sep)) and (best is None or len(r) > len(best)):
+            best = r
+    return dict(roots[next(k for k in roots if os.path.expanduser(k).rstrip(os.sep) == best)], root=best) if best else None
+
+
+def top_root(path):
+    """Suggested root for grouping: the first dir under home (~/Work, ~/my), or the path itself."""
+    home = str(Path.home())
+    if not path or not path.startswith(home + os.sep):
+        return path
+    return os.path.join(home, path[len(home) + 1:].split(os.sep)[0])
+
+
+def global_claude():
+    f = CLAUDE / "CLAUDE.md"
+    real = f.resolve() if f.exists() else f
+    repo = git(real.parent, "rev-parse", "--show-toplevel") if real.exists() else None
+    return {"path": str(f), "real": str(real), "symlink": f.is_symlink(), "repo": repo}
+
+
 def frontmatter(text):
     meta = {}
     if text.startswith("---"):
@@ -100,6 +133,7 @@ def frontmatter(text):
 
 def inventory():
     state = load_state()
+    roots = state.get("roots", {})
     out = []
     for mdir in sorted(PROJECTS.glob("*/memory")):
         files = sorted(p for p in mdir.glob("*.md") if p.name != "MEMORY.md")
@@ -130,6 +164,7 @@ def inventory():
                 "type": meta.get("type", ""),
                 "description": meta.get("description", ""),
                 "modified": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d"),
+                "age_days": (datetime.now() - datetime.fromtimestamp(p.stat().st_mtime)).days,
             })
         out.append({
             "id": pid,
@@ -139,17 +174,27 @@ def inventory():
             "repo": repo,
             "index_bytes": index.stat().st_size if index.exists() else 0,
             "records": records,
+            "root": top_root(path) if exists else None,
+            "policy": policy_for(path, roots) if exists else None,
             "done": pid in state["done"],
         })
     return out
 
 
 def cmd_inventory():
-    print(json.dumps(inventory(), ensure_ascii=False, indent=1))
+    state = load_state()
+    print(json.dumps({
+        "global_claude": global_claude(),
+        "roots": state.get("roots", {}),
+        "obsolete": state.get("obsolete", []),
+        "projects": inventory(),
+    }, ensure_ascii=False, indent=1))
 
 
 def cmd_status():
     state = load_state()
+    if not STATE.exists():
+        save_state(state)  # the run's clock starts at the first status
     projects = inventory()
     left = [p for p in projects if not p["done"]]
     total = len(state["done"]) + len(left)
@@ -157,6 +202,84 @@ def cmd_status():
           + (f", память выключена {state['finished']}" if state.get("finished") else ""))
     for p in left:
         print(f"  {p['path'] or p['id']}: {len(p['records'])} записей")
+    for root, pol in state.get("roots", {}).items():
+        print(f"Корень {root}: {pol['owner']}, публикация {pol['publish']}")
+    for item in state.get("obsolete", []):
+        print(f"Устарело: {item}")
+    for repo, b in state.get("branches", {}).items():
+        print(f"Ветка {b['branch']} в {repo} → {b['target']}")
+
+
+OWNERS = ("mine", "team", "company", "public")
+PUBLISH = ("direct", "pr", "none")
+
+
+def cmd_policy(root, owner, publish):
+    if owner not in OWNERS or publish not in PUBLISH:
+        sys.exit(f"owner: {'|'.join(OWNERS)}; publish: {'|'.join(PUBLISH)}")
+    state = load_state()
+    state_get(state, "roots", {})[os.path.expanduser(root).rstrip(os.sep)] = {"owner": owner, "publish": publish}
+    save_state(state)
+    cmd_status()
+
+
+def cmd_obsolete(text):
+    state = load_state()
+    state_get(state, "obsolete", []).append(text)
+    save_state(state)
+
+
+def cmd_branch(repo, branch, target):
+    state = load_state()
+    state_get(state, "branches", {})[repo] = {"branch": branch, "target": target}
+    save_state(state)
+
+
+# $ per MTok: input, output, cache read; cache write is 1.25x input (5 min) or 2x (1 h)
+PRICES = [("opus-5", 4, 20, 0.2), ("opus", 5, 25, 0.5), ("sonnet", 3, 15, 0.3), ("haiku", 1, 5, 0.1)]
+
+
+def price(model):
+    return next((p[1:] for p in PRICES if p[0] in (model or "")), PRICES[0][1:])
+
+
+def cmd_cost():
+    """Sum usage of every transcript that ran memtool.py since the run started, plus its subagents."""
+    state = load_state()
+    started = datetime.fromisoformat(state["started"])
+    until = datetime.fromisoformat(state["finished"]) if state.get("finished") else datetime.now()
+    since_ts = started.timestamp()
+    mains = [t for t in PROJECTS.glob("*/*.jsonl")
+             if t.stat().st_mtime >= since_ts and b"memtool.py" in t.read_bytes()]
+    files = mains + [s for t in mains for s in t.with_suffix("").glob("subagents/*.jsonl")]
+    seen, usd, tokens = set(), 0.0, 0
+    for f in files:
+        for line in open(f, "rb"):
+            if b'"usage"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            msg = row.get("message") or {}
+            try:
+                ts = datetime.fromisoformat(row.get("timestamp", "").replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            if not isinstance(msg, dict) or msg.get("id") in seen or not since_ts <= ts <= until.timestamp():
+                continue
+            seen.add(msg.get("id"))
+            u = msg.get("usage") or {}
+            p_in, p_out, p_read = price(msg.get("model"))
+            cc = u.get("cache_creation") or {}
+            w1h = cc.get("ephemeral_1h_input_tokens", 0)
+            w5m = u.get("cache_creation_input_tokens", 0) - w1h
+            usd += (u.get("input_tokens", 0) * p_in + u.get("output_tokens", 0) * p_out
+                    + u.get("cache_read_input_tokens", 0) * p_read + w5m * p_in * 1.25 + w1h * p_in * 2) / 1e6
+            tokens += u.get("input_tokens", 0) + u.get("output_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+    minutes = int((until - started).total_seconds() // 60)
+    print(f"Разбор: {minutes} мин, {len(seen)} запросов к модели, {tokens / 1e6:.1f} M токенов, ≈ ${usd:.2f} по ценам API "
+          f"({len(mains)} сесс., {len(files) - len(mains)} сабагентов)")
 
 
 def cmd_done(pid):
@@ -194,6 +317,14 @@ if __name__ == "__main__":
         cmd_inventory()
     elif args[:1] == ["status"]:
         cmd_status()
+    elif args[:1] == ["policy"] and len(args) == 4:
+        cmd_policy(*args[1:])
+    elif args[:1] == ["obsolete"] and len(args) == 2:
+        cmd_obsolete(args[1])
+    elif args[:1] == ["branch"] and len(args) == 4:
+        cmd_branch(*args[1:])
+    elif args[:1] == ["cost"]:
+        cmd_cost()
     elif args[:1] == ["done"] and len(args) == 2:
         cmd_done(args[1])
     elif args[:1] == ["finish"]:
