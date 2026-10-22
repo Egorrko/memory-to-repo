@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "memory-to-repo",
+  "description": "Память агента — в репозиторий, а не в локальную папку",
+  "owner": { "name": "Egorrko" },
+  "plugins": [
+    {
+      "name": "memory-to-repo",
+      "description": "Разобрать локальную память Claude Code вместе с человеком: общее — в инструкции репозиториев, личное — в CLAUDE.md, память — выключить.",
+      "version": "0.1.0",
+      "source": "./",
+      "category": "productivity",
+      "homepage": "https://github.com/Egorrko/memory-to-repo"
+    }
+  ]
+}
